@@ -18,13 +18,14 @@ from openpyxl.worksheet.hyperlink import Hyperlink
 import undetected_chromedriver as uc
 
 class LinkedInProfileScraper:
-    def __init__(self, output_file, include_columns, connection_range=(0, 10)):
+    def __init__(self, output_file, include_columns, connection_range=(0, 10), excel_file_path=None):
         self.driver = self.init_driver()
         self.output_file = output_file
         self.urls = []
         self.cookies_file = "cookies.pkl"
         self.connection_range = connection_range
         self.include_columns = include_columns  # Save INCLUDE_COLUMNS as an instance attribute
+        self.excel_file_path = excel_file_path
 
 
     def init_driver(self):
@@ -53,15 +54,18 @@ class LinkedInProfileScraper:
         except Exception as e:
             print(f"Error saving HTML content: {e}")
 
-    # def load_urls_from_excel(self, file_path):
-    #     try:
-    #         df = pd.read_excel(file_path)
-    #         if 'URL' not in df.columns:
-    #             raise ValueError("Input Excel file must contain a 'URL' column.")
-    #         return df['URL'].tolist()
-    #     except Exception as e:
-    #         print(f"Error loading URLs from Excel: {e}")
-    #         return []
+    def load_urls_from_excel(self):
+        try:
+            if not self.excel_file_path:
+                return []  # Return an empty list if no file path is provided
+            
+            df = pd.read_excel(self.excel_file_path)
+            if 'URL' not in df.columns:
+                raise ValueError("Input Excel file must contain a 'URL' column.")
+            return df['URL'].dropna().tolist()  # Return a list of non-empty URLs
+        except Exception as e:
+            print(f"Error loading URLs from Excel: {e}")
+            return []
 
     def save_cookies(self):
         try:
@@ -125,6 +129,120 @@ class LinkedInProfileScraper:
             
         except Exception as e:
             print(f"Error during human scroll: {e}")
+    
+    def normalize_url(self, url):
+        """Remove the trailing slash from a URL if present."""
+        return url.rstrip("/")
+
+    def get_excel_connection_urls(self):
+        # Load URLs from the Excel file
+        excel_urls = set(map(self.normalize_url, self.load_urls_from_excel()))  # Use a set for faster lookups
+        if not excel_urls:
+            print("No URLs found in the Excel file.")
+            return []
+
+        # Navigate to the LinkedIn sent invitations page
+        self.driver.get("https://www.linkedin.com/mynetwork/invitation-manager/sent/")
+        time.sleep(2)  # Allow the page to load
+
+        # Initialize results
+        pending_connections = []
+        processed_urls = set()  # To track URLs already found
+        last_url = None  # Track the last URL from the previous iteration
+        retry_count = 0  # Counter for retries when last URL doesn't change
+
+        while len(processed_urls) < len(excel_urls):
+            # Scroll to load more profiles
+            self.human_scroll()
+            time.sleep(2)  # Pause for LinkedIn to load content
+
+            # Find all pending connection cards
+            pending_profiles = self.driver.find_elements(By.CSS_SELECTOR, 'li.invitation-card')
+            
+            # If no profiles are found, break out of the loop
+            if not pending_profiles:
+                print("No pending profiles found. Exiting.")
+                break
+
+            # Track the last profile URL in the current list
+            try:
+                current_last_url = pending_profiles[-1].find_element(By.CSS_SELECTOR, 'a[href*="linkedin.com/in/"]').get_attribute('href')
+            except Exception:
+                current_last_url = None
+
+            # If the last URL hasn't changed, increase the retry count
+            if current_last_url == last_url:
+                retry_count += 1
+                print(f"No new profiles loaded. Retry {retry_count}/2.")
+                if retry_count >= 2:  # Try clicking "Next" before breaking the loop
+                    print("No new content loaded. Attempting to navigate to the next page.")
+                    try:
+                        next_button = self.driver.find_element(By.CSS_SELECTOR, 'button.artdeco-pagination__button--next')
+                        if not next_button.get_attribute("disabled"):  # Check if the "Next" button is enabled
+                            self.driver.execute_script("arguments[0].click();", next_button)
+                            time.sleep(2)  # Allow time for the next page to load
+                            retry_count = 0  # Reset retry count after clicking "Next"
+                            continue  # Retry loading profiles on the new page
+                        else:
+                            print("No more pages to navigate. Exiting.")
+                            break
+                    except Exception as e:
+                        print(f"Failed to navigate to the next page: {e}")
+                        break
+            else:
+                retry_count = 0  # Reset retry count if new content is found
+
+            # Update the last URL for the next iteration
+            last_url = current_last_url
+
+            for profile in pending_profiles:
+                try:
+                    # Extract the profile URL
+                    url = profile.find_element(By.CSS_SELECTOR, 'a[href*="linkedin.com/in/"]').get_attribute('href')
+
+                    if url not in excel_urls or url in processed_urls:
+                        continue  # Skip URLs not in Excel or already processed
+
+                    try:
+                        # Click the "See more" button if available
+                        try:
+                            see_more_button = profile.find_element(By.CSS_SELECTOR, 'a.lt-line-clamp__more')
+                            self.driver.execute_script("arguments[0].click();", see_more_button)
+                            time.sleep(0.5)  # Allow time for the content to expand
+                        except Exception:
+                            pass  # If no button is found, proceed to scrape the visible text
+
+                        # Extract the message
+                        message = self.driver.execute_script("""
+                            let messageContainer = arguments[0].querySelector('.invitation-card__custom-message span.lt-line-clamp__line');
+                            return messageContainer ? messageContainer.textContent.trim() : 'N/A';
+                        """, profile)
+                    except Exception:
+                        message = "N/A"
+
+                    # Extract the sent time
+                    try:
+                        sent_time = profile.find_element(By.CSS_SELECTOR, '.time-badge.t-12.t-black--light.t-normal').text.strip()
+                    except Exception:
+                        sent_time = "N/A"
+
+                    # Append to results
+                    pending_connections.append({"profile_url": url, "message": message, "sent_time": sent_time})
+                    processed_urls.add(url)  # Mark this URL as processed
+
+                    # Stop if all Excel URLs are processed
+                    if len(processed_urls) == len(excel_urls):
+                        break
+
+                except Exception as e:
+                    print(f"Error processing profile: {e}")
+                    continue
+
+            # Check if all Excel URLs are processed
+            if len(processed_urls) == len(excel_urls):
+                break
+        
+        return pending_connections
 
     def get_unanswered_connection_urls(self, connection_range):
         self.driver.get("https://www.linkedin.com/mynetwork/invitation-manager/sent/")
@@ -134,15 +252,19 @@ class LinkedInProfileScraper:
             people_invites = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "button[aria-label*='sent People invitation'] span.artdeco-pill__text"))
             ).text
-            total_pending_invites = int(re.search(r"\d{1,3}(?:,\d{3})*", people_invites).group(1))
-            print(f"Total Pending Invites: {total_pending_invites}")
+            match = re.search(r"\((\d{1,3}(?:,\d{3})*)\)", people_invites)
+            if match:
+                total_pending_invites = int(match.group(1).replace(",", ""))
+                print(f"Total Pending Invites: {total_pending_invites}")
+            else:
+                raise ValueError("No match found in 'people_invites'")
 
             # Adjust the target count based on range and available invites
-            start_count = connection_range[0]
+            start_count = connection_range[0] - 1
             end_count = min(connection_range[1], total_pending_invites)
         except Exception as e:
             print(f"Failed to retrieve pending invites count: {e}")
-            start_count = connection_range[0]
+            start_count = connection_range[0] - 1
             end_count = connection_range[1]
 
         total_visible_profiles = 0
@@ -172,6 +294,15 @@ class LinkedInProfileScraper:
                 url = "N/A"
 
             try:
+                # Click the "See more" button if available
+                try:
+                    see_more_button = profile.find_element(By.CSS_SELECTOR, 'a.lt-line-clamp__more')
+                    self.driver.execute_script("arguments[0].click();", see_more_button)
+                    time.sleep(0.5)  # Allow time for the content to expand
+                except Exception:
+                    pass  # If no button is found, proceed to scrape the visible text
+
+                # Extract the message
                 message = self.driver.execute_script("""
                     let messageContainer = arguments[0].querySelector('.invitation-card__custom-message span.lt-line-clamp__line');
                     return messageContainer ? messageContainer.textContent.trim() : 'N/A';
@@ -179,7 +310,13 @@ class LinkedInProfileScraper:
             except Exception:
                 message = "N/A"
 
-            pending_connections.append({"profile_url": url, "message": message})
+            try:
+                # Extract the time the invitation was sent
+                sent_time = profile.find_element(By.CSS_SELECTOR, '.time-badge.t-12.t-black--light.t-normal').text.strip()
+            except Exception:
+                sent_time = "N/A"
+
+            pending_connections.append({"profile_url": url, "message": message, "sent_time": sent_time})
         
         return pending_connections
 
@@ -1060,12 +1197,18 @@ class LinkedInProfileScraper:
         self.login()
         profiles_data = []
 
-        # Get connection URLs based on the specified range
-        pending_connections = self.get_unanswered_connection_urls(self.connection_range)
-
+        # Load URLs from Excel if the file path is provided
+        if self.excel_file_path:
+            print("Retrieving data for URLs from Excel file...")
+            pending_connections = self.get_excel_connection_urls()
+        else:
+            print("Retrieving URLs via scraping...")
+            pending_connections = self.get_unanswered_connection_urls(self.connection_range)
+        
         for connection in pending_connections:
             url = connection['profile_url']
             message = connection['message']
+            sent_time = connection['sent_time']
             print(f"Scraping {url}...")
 
             try:
@@ -1074,6 +1217,7 @@ class LinkedInProfileScraper:
 
                 # Add the message to the profile data dictionary
                 profile_data['message'] = message
+                profile_data['sent time'] = sent_time
                 profiles_data.append(profile_data)
 
                 # Save progress (file handling is done in save_to_excel)
@@ -1092,34 +1236,43 @@ if __name__ == "__main__":
         "fullName",
         "Search Query",
         "summary",
-        "headline",
-        "location",
-        "flagshipProfileUrl",
-        "numOfConnections",
-        "Degree",
-        "Position Title",
-        "Position Description",
-        "Company Name",
-        "More Positions",
-        "Descriptions",
-        "Skills",
-        "Education Degree",
-        "SchoolName",
-        "More Educations",
-        "Total Years of Exp(in Yrs)",
-        "Exp in Current Firm(In Yrs.Months)",
-        "ContactInfo",
-        "Interest: Groups",
-        "Interest: Newsletters",
-        "Interest: Companies",
-        "Interest: Top Voices",
-        "Interest: Schools",
-        "Birthday",
-        "ConnectedOn",
-        "Profiles for You",
-        "Connection Status",
+        # "headline",
+        # "location",
+        # "flagshipProfileUrl",
+        # "numOfConnections",
+        # "Degree",
+        # "Position Title",
+        # "Position Description",
+        # "Company Name",
+        # "More Positions",
+        # "Descriptions",
+        # "Skills",
+        # "Education Degree",
+        # "SchoolName",
+        # "More Educations",
+        # "Total Years of Exp(in Yrs)",
+        # "Exp in Current Firm(In Yrs.Months)",
+        # "ContactInfo",
+        # "Interest: Groups",
+        # "Interest: Newsletters",
+        # "Interest: Companies",
+        # "Interest: Top Voices",
+        # "Interest: Schools",
+        # "Birthday",
+        # "ConnectedOn",
+        # "Profiles for You",
+        # "Connection Status",
+        "message",
+        "sent time",
     ]
     output_file = "linkedin_output.xlsx"  # Output file
-    connection_range = (3, 10)  # Specify the range of connections to scrape
-    scraper = LinkedInProfileScraper(output_file, include_columns=INCLUDE_COLUMNS, connection_range=connection_range)
+    connection_range = (1, 3)  # Specify the range of connections to scrape
+    excel_file_path = "linkedin_profiles.xlsx"  # Replace with actual Excel file path or set to None
+    scraper = LinkedInProfileScraper(
+        output_file,
+        include_columns=INCLUDE_COLUMNS,
+        connection_range=connection_range,
+        # excel_file_path=excel_file_path  # Pass the Excel file path here
+    )
+
     scraper.run()

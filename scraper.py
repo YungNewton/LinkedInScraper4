@@ -16,6 +16,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.hyperlink import Hyperlink
 import undetected_chromedriver as uc
+import chromedriver_autoinstaller
 
 class LinkedInProfileScraper:
     def __init__(self, output_file, include_columns, connection_range=(0, 10), excel_file_path=None):
@@ -29,13 +30,15 @@ class LinkedInProfileScraper:
 
 
     def init_driver(self):
+        chromedriver_autoinstaller.install()  # Ensures ChromeDriver matches your Chrome version
         options = uc.ChromeOptions()
         options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")  # Disable shared memory usage
-        options.add_argument("--disable-gpu")  # Disable GPU rendering
-        options.add_argument("--start-maximized")  # Start browser maximized
-        options.add_argument("--disable-blink-features=AutomationControlled")  # Prevent automation detection
-        driver = uc.Chrome(options=options)
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+
+        driver = uc.Chrome(options=options, use_subprocess=True)
         return driver
 
     def save_html_content(self, company_name):
@@ -129,6 +132,30 @@ class LinkedInProfileScraper:
             
         except Exception as e:
             print(f"Error during human scroll: {e}")
+
+    def scroll_to_end(self):
+        """Scroll to the bottom of the page until content stops loading."""
+        try:
+            scroll_pause = random.uniform(1, 1.5)  # Pause between scrolls to simulate human behavior
+            last_height = self.driver.execute_script("return document.body.scrollHeight")  # Initial page height
+            
+            while True:
+                # Scroll down by a small step
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(scroll_pause)
+                
+                # Wait for new content to load
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                
+                # Check if the scroll height has not increased
+                if new_height == last_height:
+                    print("No more content to load.")
+                    break
+                
+                last_height = new_height  # Update last height
+                
+        except Exception as e:
+            print(f"Error during scroll to end: {e}")
     
     def normalize_url(self, url):
         """Remove the trailing slash from a URL if present."""
@@ -257,7 +284,8 @@ class LinkedInProfileScraper:
             start_count = connection_range[0] - 1
             end_count = connection_range[1]
 
-        pending_profiles = set()  # Store unique URLs
+        pending_profiles = []  # Store URLs in a list to preserve order
+        seen_urls = set()  # Track unique URLs to avoid duplicates
         pending_connections = []  # Store scraped details
         last_profile_url = None  # Track the last profile's URL
         retry_count = 0  # Retry counter
@@ -269,16 +297,18 @@ class LinkedInProfileScraper:
             # Retrieve all currently loaded pending connection items
             current_profiles = self.driver.find_elements(By.CSS_SELECTOR, 'li.invitation-card')
 
-            # Add URLs from current profiles to the cumulative set
+            # Add URLs from current profiles to the list, maintaining order
             for profile in current_profiles:
                 try:
                     url = profile.find_element(By.CSS_SELECTOR, 'a[href*="linkedin.com/in/"]').get_attribute('href')
-                    pending_profiles.add(url)
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        pending_profiles.append(url)
                 except Exception:
                     continue
 
             # Scrape details for profiles within the specified range
-            for url in list(pending_profiles)[start_count:end_count]:
+            for url in pending_profiles[start_count:end_count]:
                 # Skip URLs already processed
                 if any(conn["profile_url"] == url for conn in pending_connections):
                     continue
@@ -363,6 +393,7 @@ class LinkedInProfileScraper:
         self.driver.get(experience_url)
         self.random_pause()
         self.human_scroll()
+        self.scroll_to_end()
 
         current_positions = {"Position Title": [], "Position Description": [], "Company Name": []}
         more_positions = []
@@ -645,6 +676,7 @@ class LinkedInProfileScraper:
         self.driver.get(education_url)
         self.random_pause()
         self.human_scroll()
+        self.scroll_to_end()
 
         education_degree = "N/A"
         school_name = "N/A"
@@ -954,18 +986,37 @@ class LinkedInProfileScraper:
 
         if METHOD_COLUMN_MAP["scrape_summary"].intersection(self.include_columns):
             try:
-                # Use updated CSS selector to locate the summary content
-                summary_element = self.driver.find_element(By.CSS_SELECTOR, 'div.display-flex.ph5.pv3 span[aria-hidden="true"]')
-                summary = summary_element.text.strip()  # Stripping to remove extra spaces or newlines
-                
-                # Check for unwanted phrases
-                if "You've previously worked with" in summary or "You've previously worked together" in summary:
-                    summary = "N/A"  # Set summary to N/A if it contains the unwanted phrases
+                # Locate all sections with the potential "About" heading
+                sections = self.driver.find_elements(By.CSS_SELECTOR, 'section.artdeco-card')
+
+                summary = "N/A"  # Default value
+
+                for section in sections:
+                    try:
+                        # Check if the section has an "About" heading
+                        heading_element = section.find_element(By.CSS_SELECTOR, 'h2.pvs-header__title span[aria-hidden="true"]')
+                        heading_text = heading_element.text.strip()
+
+                        if heading_text == "About":
+                            # Locate the summary within the correct "About" section
+                            summary_element = section.find_element(By.CSS_SELECTOR, 'div.display-flex.ph5.pv3 span[aria-hidden="true"]')
+                            summary = summary_element.text.strip()
+
+                            # Check for unwanted phrases
+                            if "You've previously worked with" in summary or "You've previously worked together" in summary:
+                                summary = "N/A"  # Set to N/A if it contains unwanted phrases
+                            
+                            # Break after finding the first valid "About" section
+                            break
+                    except Exception:
+                        # Continue to the next section if the current one doesn't match or fails
+                        continue
 
             except Exception as e:
                 summary = "N/A"
                 print(f"Failed to scrape summary: {e}")
 
+            # Add the scraped or default summary to the result
             result["summary"] = summary
 
         if METHOD_COLUMN_MAP["scrape_headline"].intersection(self.include_columns):
@@ -982,17 +1033,20 @@ class LinkedInProfileScraper:
         # Check for "Connection Status"
         if METHOD_COLUMN_MAP["scrape_connection_status"].intersection(self.include_columns):
             try:
-                pending_button = self.driver.find_element(
-                    By.CSS_SELECTOR,
-                    'button.artdeco-button.artdeco-button--muted svg[data-test-icon="clock-small"] + span.artdeco-button__text'
+                # Locate the svg icon first, then find its parent button
+                clock_svg = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, 'svg[data-test-icon="clock-small"]'))
                 )
-                if "Pending" in pending_button.text:
-                    connection_status = "Pending"
-                else:
+                pending_button = clock_svg.find_element(By.XPATH, './ancestor::button')
+                
+                # Verify the button contains the "Pending" text
+                connection_status = pending_button.find_element(By.CSS_SELECTOR, 'span.artdeco-button__text').text.strip()
+                if "Pending" not in connection_status:
                     connection_status = "-"
-            except Exception:
+            except Exception as e:
                 connection_status = "-"
-            
+                print(f"Error retrieving connection status: {e}")
+
             result["Connection Status"] = connection_status
         
         if METHOD_COLUMN_MAP["scrape_location"].intersection(self.include_columns):
@@ -1258,42 +1312,42 @@ if __name__ == "__main__":
         "Search Query",
         "summary",
         "headline",
-        "location",
-        "flagshipProfileUrl",
-        "numOfConnections",
-        "Degree",
-        "Position Title",
-        "Position Description",
-        "Company Name",
-        "More Positions",
-        "Descriptions",
-        "Skills",
-        "Education Degree",
-        "SchoolName",
-        "More Educations",
-        "Total Years of Exp(in Yrs)",
-        "Exp in Current Firm(In Yrs.Months)",
-        "ContactInfo",
-        "Interest: Groups",
-        "Interest: Newsletters",
-        "Interest: Companies",
-        "Interest: Top Voices",
-        "Interest: Schools",
-        "Birthday",
-        "ConnectedOn",
-        "Profiles for You",
-        "Connection Status",
-        "message",
-        "sent time",
+        # "location",
+        # "flagshipProfileUrl",
+        # "numOfConnections",
+        # "Degree",
+        # "Position Title",
+        # "Position Description",
+        # "Company Name",
+        # "More Positions",
+        # "Descriptions",
+        # "Skills",
+        # "Education Degree",
+        # "SchoolName",
+        # "More Educations",
+        # "Total Years of Exp(in Yrs)",
+        # "Exp in Current Firm(In Yrs.Months)",
+        # "ContactInfo",
+        # "Interest: Groups",
+        # "Interest: Newsletters",
+        # "Interest: Companies",
+        # "Interest: Top Voices",
+        # "Interest: Schools",
+        # "Birthday",
+        # "ConnectedOn",
+        # "Profiles for You",
+        # "Connection Status",
+        # "message",
+        # "sent time",
     ]
     output_file = "linkedin_output.xlsx"  # Output file
-    connection_range = (120, 126)  # Specify the range of connections to scrape
+    connection_range = (1, 3)  # Specify the range of connections to scrape
     excel_file_path = "linkedin_profiles.xlsx"  # Replace with actual Excel file path or set to None
     scraper = LinkedInProfileScraper(
         output_file,
         include_columns=INCLUDE_COLUMNS,
         connection_range=connection_range,
-        excel_file_path=excel_file_path  # Pass the Excel file path here
+        # excel_file_path=excel_file_path  # Pass the Excel file path here
     )
 
     scraper.run()

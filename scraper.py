@@ -32,13 +32,14 @@ class LinkedInProfileScraper:
     def init_driver(self):
         chromedriver_autoinstaller.install()  # Ensures ChromeDriver matches your Chrome version
         options = uc.ChromeOptions()
+        options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--start-maximized")
         options.add_argument("--disable-blink-features=AutomationControlled")
 
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        driver = uc.Chrome(options=options, version_main=132, use_subprocess=True)
         return driver
 
     def save_html_content(self, company_name):
@@ -210,12 +211,13 @@ class LinkedInProfileScraper:
                     except Exception:
                         pass  # If no button is found, proceed to scrape the visible text
 
-                    message = self.driver.execute_script("""
-                        let messageContainer = arguments[0].querySelector('.invitation-card__custom-message span.lt-line-clamp__line');
-                        return messageContainer ? messageContainer.textContent.trim() : 'N/A';
-                    """, profile)
+                    message_element = profile.find_elements(By.CSS_SELECTOR, '.invitation-card__custom-message span.lt-line-clamp__line')
+                    if message_element:
+                        message = message_element[0].text.strip() if message_element[0].text.strip() else "N/A"
 
-                    sent_time = profile.find_element(By.CSS_SELECTOR, '.time-badge.t-12.t-black--light.t-normal').text.strip()
+                    sent_time_element = profile.find_elements(By.CSS_SELECTOR, '.time-badge.t-12.t-black--light.t-normal')
+                    if sent_time_element:
+                        sent_time = sent_time_element[0].text.strip() if sent_time_element[0].text.strip() else "N/A"
 
                     pending_connections.append({"profile_url": url, "message": message, "sent_time": sent_time})
 
@@ -325,12 +327,13 @@ class LinkedInProfileScraper:
                     except Exception:
                         pass  # If no button is found, proceed to scrape the visible text
 
-                    message = self.driver.execute_script("""
-                        let messageContainer = arguments[0].querySelector('.invitation-card__custom-message span.lt-line-clamp__line');
-                        return messageContainer ? messageContainer.textContent.trim() : 'N/A';
-                    """, profile)
+                    message_element = profile.find_elements(By.CSS_SELECTOR, '.invitation-card__custom-message span.lt-line-clamp__line')
+                    if message_element:
+                        message = message_element[0].text.strip() if message_element[0].text.strip() else "N/A"
 
-                    sent_time = profile.find_element(By.CSS_SELECTOR, '.time-badge.t-12.t-black--light.t-normal').text.strip()
+                    sent_time_element = profile.find_elements(By.CSS_SELECTOR, '.time-badge.t-12.t-black--light.t-normal')
+                    if sent_time_element:
+                        sent_time = sent_time_element[0].text.strip() if sent_time_element[0].text.strip() else "N/A"
 
                     pending_connections.append({"profile_url": url, "message": message, "sent_time": sent_time})
 
@@ -401,6 +404,7 @@ class LinkedInProfileScraper:
         more_skills = []
         processed_anchors = set()  # Track processed anchors to avoid duplication
         experiences = []  # Store experiences for calculating total experience
+        current_firm_experiences = []  # NEW: Stores (start_date, end_date) pairs for current roles
 
 
         try:
@@ -419,6 +423,8 @@ class LinkedInProfileScraper:
 
                         # Company name
                         company_name = company_name_elements[0].text.strip()
+                        role_dates = []  # Collect all start/end dates for this experience item
+                        has_current_role = False  # Track if any role is ongoing (no end date)
 
                         # Process multiple roles under the same company
                         if len(company_name_elements) > 1:
@@ -443,6 +449,8 @@ class LinkedInProfileScraper:
                                     start_date, end_date, _ = self.extract_dates_and_duration(date_range)
                                 except:
                                     start_date, end_date = "N/A", "N/A"
+
+                                role_dates.append((start_date, end_date))
 
                                 # After extracting start_date and end_date
                                 experiences.append({
@@ -487,9 +495,14 @@ class LinkedInProfileScraper:
                                     current_positions["Position Description"].append(position_description)
                                     current_positions["Company Name"].append(company_name)
                                     more_positions.insert(0, position_entry)
+                                    has_current_role = True  
 
                                 else:
                                     more_positions.append(position_entry)
+
+                            if has_current_role:
+                                current_firm_experiences.append(role_dates)
+
                     else:
                         # Fetch job title
                         job_title_element = experience.find_element(By.CLASS_NAME, 'mr1')
@@ -563,6 +576,7 @@ class LinkedInProfileScraper:
                             current_positions["Position Description"].append(position_description)
                             current_positions["Company Name"].append(company_name)
                             more_positions.insert(0, position_entry)
+                            current_firm_experiences.append((start_date, end_date))
 
                         else:
                             more_positions.append(position_entry)
@@ -577,7 +591,7 @@ class LinkedInProfileScraper:
             more_descriptions_string = ',\n'.join(more_descriptions)
             more_skills_string = ',\n'.join(more_skills)
 
-            return current_positions, more_positions_string, more_descriptions_string, more_skills_string, experiences
+            return current_positions, more_positions_string, more_descriptions_string, more_skills_string, experiences, current_firm_experiences
 
         except Exception as e:
             return {"Position Title": "N/A", "Company Name": "N/A"}, "N/A", "N/A", "N/A"
@@ -1104,7 +1118,7 @@ class LinkedInProfileScraper:
 
         if METHOD_COLUMN_MAP["scrape_experience"].intersection(self.include_columns):
             # Call scrape_experience with profile URL
-            current_positions, more_positions, more_descriptions, more_skills, experiences = self.scrape_experience(url)
+            current_positions, more_positions, more_descriptions, more_skills, experiences, current_firm_experiences = self.scrape_experience(url)
 
             try:
                 total_years_of_exp = self.calculate_total_experience(experiences)
@@ -1114,7 +1128,7 @@ class LinkedInProfileScraper:
                 result["Total Years of Exp(in Yrs)"] = "N/A"
 
             try:
-                exp_in_current_firm = self.calculate_current_firm_experience(experiences)
+                exp_in_current_firm = self.calculate_current_firm_experience(current_firm_experiences)
                 result["Exp in Current Firm(In Yrs.Months)"] = exp_in_current_firm
             except:
                 exp_in_current_firm = "N/A"
@@ -1161,43 +1175,50 @@ class LinkedInProfileScraper:
 
         return {k: v for k, v in result.items() if k in self.include_columns}
 
-    def calculate_current_firm_experience(self, experiences):
+    def calculate_current_firm_experience(self, current_firm_experiences):
         """
-        Calculate the experience in the current firm by identifying ongoing roles.
-        Uses 'Present' as a string for end dates, calculating up to the current date.
+        Calculate the total experience for current firm experiences.
+        Uses the current date for ongoing roles where end_date is empty.
         """
         try:
-            # Filter experiences that are still ongoing (i.e., end date is "Present")
-            current_experiences = [experience for experience in experiences if experience.get("end_date", " ") == " "]
+            date_pairs = []
 
-            # If no ongoing experiences are found, return "0.0"
-            if not current_experiences:
+            # Process each list of (start_date, end_date) pairs in current_firm_experiences
+            for experience_group in current_firm_experiences:
+                for start_date_str, end_date_str in experience_group:
+                    
+                    # Convert start_date_str to datetime object
+                    if start_date_str != "N/A":
+                        start_date = datetime.strptime(start_date_str, "%m/%Y")
+                    else:
+                        continue  # Skip if no valid start date is found
+
+                    # Convert end_date_str to datetime object or use current date if "Present"
+                    end_date = datetime.now() if end_date_str == " " else datetime.strptime(end_date_str, "%m/%Y")
+                    date_pairs.append((start_date, end_date))
+
+            # If there are no valid date pairs, return "0.0"
+            if not date_pairs:
                 return "0.0"
 
-            # Find the oldest start date among the ongoing experiences
-            oldest_start_date = min(
-                datetime.strptime(exp.get("start_date", "N/A"), "%m/%Y") 
-                for exp in current_experiences 
-                if exp.get("start_date", "N/A") != "N/A"
-            )
-            
-            # Use the current date as the end date for ongoing roles
-            end_date = datetime.now()
+            # Find the minimum start date and the maximum end date
+            earliest_start_date = min([start for start, _ in date_pairs])
+            latest_end_date = max([end for _, end in date_pairs])
 
-            # Calculate the difference in total months
-            total_months = (end_date.year - oldest_start_date.year) * 12 + (end_date.month - oldest_start_date.month)
+            # Calculate the difference in years and months
+            total_months = (latest_end_date.year - earliest_start_date.year) * 12 + (latest_end_date.month - earliest_start_date.month)
             years = total_months // 12
             months = total_months % 12
 
-            # Format the result as 'years.months' with zero-padded months if less than 10 (e.g., 0.10 for 10 months)
+            # Format the result as 'years.months' with zero-padded months if less than 10 (e.g., 2.06 for 2 years, 6 months)
             if years == 0:
-                current_firm_experience = f"0.{months}"  # Only show months as decimal for less than 1 year
+                total_experience = f"0.{months}"  # Only show months as decimal for less than 1 year
             else:
-                current_firm_experience = f"{years}.{str(months).zfill(2)}"
+                total_experience = f"{years}.{str(months).zfill(2)}"
 
-            return current_firm_experience
+            return total_experience
         except Exception as e:
-            print(f"Error calculating experience in current firm: {e}")
+            print(f"Error calculating current firm experience: {e}")
             return "0.0"
     
     def generate_custom_title(self, full_name, summary):
@@ -1279,26 +1300,52 @@ class LinkedInProfileScraper:
         else:
             print("Retrieving URLs via scraping...")
             pending_connections = self.get_unanswered_connection_urls(self.connection_range)
-        
+
+        processed_urls = set()  # Track URLs to ensure no duplicates
+
         for connection in pending_connections:
-            url = connection['profile_url']
-            message = connection['message']
-            sent_time = connection['sent_time']
-            print(f"Scraping {url}...")
+            if not isinstance(connection, dict):
+                print(f"Skipping malformed connection entry: {connection}")
+                continue  # Skip if not a valid dictionary
+            
+            url = connection.get("profile_url", "").strip()
+
+            # Ensure `url` is extracted correctly
+            if isinstance(url, dict):  
+                url = url.get("profile_url", "").strip()
+
+            if not isinstance(url, str) or not url:
+                print(f"Skipping invalid URL: {url}")
+                continue  # Skip invalid or empty URLs
+            
+            # 🚀 **Fix duplicate URL issue**
+            if url in processed_urls:
+                print(f"Skipping duplicate URL: {url}")
+                continue
+            processed_urls.add(url)  # Add to processed URLs set
+
+            message = connection.get("message", "N/A")
+            sent_time = connection.get("sent_time", "N/A")
+
+            print(f"Scraping profile: {url}...")  # ✅ Ensure each URL is different
 
             try:
-                # Scrape profile data
+                # Ensure **each profile is actually scraped fresh**
+                self.driver.get(url)  
+                time.sleep(2)  # Give time for page to load before scraping
+
                 profile_data = self.scrape_profile(url)
 
-                # Add the message to the profile data dictionary
-                profile_data['message'] = message
-                profile_data['sent time'] = sent_time
+                # ✅ **Ensure data is tied to the specific profile**
+                profile_data["profile_url"] = url
+                profile_data["message"] = message
+                profile_data["sent time"] = sent_time
+
                 profiles_data.append(profile_data)
 
-                # Save progress (file handling is done in save_to_excel)
+                # Save progress (avoids losing data if script crashes)
                 self.save_to_excel(profiles_data)
             except Exception as e:
-                # Log the error and continue to the next URL
                 print(f"Error scraping {url}: {e}")
                 continue
 
@@ -1337,11 +1384,11 @@ if __name__ == "__main__":
         # "ConnectedOn",
         # "Profiles for You",
         # "Connection Status",
-        # "message",
-        # "sent time",
+        "message",
+        "sent time",
     ]
     output_file = "linkedin_output.xlsx"  # Output file
-    connection_range = (1, 3)  # Specify the range of connections to scrape
+    connection_range = (92, 94)  # Specify the range of connections to scrape
     excel_file_path = "linkedin_profiles.xlsx"  # Replace with actual Excel file path or set to None
     scraper = LinkedInProfileScraper(
         output_file,
